@@ -1,0 +1,65 @@
+name: Windows RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+    steps:
+      - name: Enable RDP and set password
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          if ($env:RDP_PASSWORD) {
+            $Password = $env:RDP_PASSWORD
+            Write-Output "Using RDP password from secret RDP_PASSWORD (not shown in log)"
+          } else {
+            $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%&*'
+            $Password = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+            Write-Output "GENERATED_RDP_PASSWORD=$Password"
+            Write-Output "Username: runneradmin"
+            Write-Output "Password (generated, save it now): $Password"
+          }
+          net user runneradmin $Password
+          if ($LASTEXITCODE -ne 0) { throw "Failed to set runneradmin password" }
+          Write-Output "RDP enabled for user runneradmin"
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          if (-not $env:TS_AUTHKEY) { throw "TS_AUTHKEY secret is missing. Add it in repo Settings > Secrets and variables > Actions > New repository secret, name TS_AUTHKEY, value = Tailscale auth key from login.tailscale.com/admin/settings/keys" }
+          $msi = "$env:TEMP\tailscale-setup.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Start-Sleep -Seconds 10
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tailscale)) { throw "Tailscale exe not found after install" }
+          Write-Output "Tailscale installed"
+
+      - name: Connect Tailscale and keep alive
+        shell: powershell
+        run: |
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tailscale up --authkey=$env:TS_AUTHKEY --hostname=gh-win-rdp --accept-dns=false
+          Start-Sleep -Seconds 10
+          $ip = (& $tailscale ip -4).Trim()
+          Write-Output "========================================"
+          Write-Output "WINDOWS RDP READY"
+          Write-Output "Tailscale IP: $ip"
+          Write-Output "Username: runneradmin"
+          Write-Output "Password: see GENERATED_RDP_PASSWORD above, or your RDP_PASSWORD secret"
+          Write-Output "Connect from Android: Tailscale app ON, then Microsoft Remote Desktop app -> Add PC -> $ip"
+          Write-Output "This window stays alive up to 6 hours. Cancel the workflow run to shut it down."
+          Write-Output "========================================"
+          for ($i = 0; $i -lt 70; $i++) {
+            $now = Get-Date -Format "HH:mm"
+            $curIp = (& $tailscale ip -4).Trim()
+            Write-Output "[$now] Still alive - RDP IP: $curIp - Username: runneradmin"
+            Start-Sleep -Seconds 300
+          }
